@@ -41,6 +41,18 @@ LimitNOFILE=4096
 [Install]
 WantedBy=multi-user.target
 ```
+
+### After (TCP bind on port 8000, accessible to LB/NGINX):
+```
+ExecStart=/home/ubuntu/shared_venv/bin/gunicorn \
+  --workers 2 \
+  --pid /run/gunicorn/gunicorn.pid \
+  --bind 0.0.0.0:8000 \
+  hiringdogbackend.wsgi:application
+
+```
+
+
 ***/etc/systemd/system/celery-beat.service***         
 
 ```
@@ -106,4 +118,93 @@ StandardError=inherit
 
 [Install]
 WantedBy=multi-user.target
+```
+***UNIX Socket***
+Instead of binding Gunicorn to a TCP port, it binds to a Unix socket (/run/gunicorn/gunicorn.sock).
+Nginx proxies requests to this socket.
+Benefits:
+- Faster than TCP localhost. lower latency 
+- No open port exposed. 
+- Clear boundary: Nginx ⇄ Gunicorn via socket.
+***cat /etc/nginx/sites-available/hiringdogbackend***                                    
+```
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 444;  # Close connection for requests to the IP
+}
+
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    ssl_certificate /etc/letsencrypt/live/api.hdiplatform.in/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.hdiplatform.in/privkey.pem;
+    return 444;  # Close connection for HTTPS requests to the IP
+}
+server {
+    listen 80;
+    server_name api.hdiplatform.in;
+    return 301 https://$host$request_uri;  # Redirect HTTP to HTTPS
+}
+
+server {
+    listen 443 ssl;
+    server_name api.hdiplatform.in;
+
+    ssl_certificate /etc/letsencrypt/live/api.hdiplatform.in/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.hdiplatform.in/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    location / {
+            #proxy_pass http://127.0.0.1:5000;  # Change port if needed
+        proxy_pass http://unix:/run/gunicorn/gunicorn.sock:;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    client_max_body_size 25M;
+    error_log /var/log/nginx/hiringdogbackend_error.log;
+    access_log /var/log/nginx/hiringdogbackend_access.log;
+}
+```
+
+### Test and Reload: 
+` sudo nginx -t && sudo systemctl reload nginx`
+
+- Check if the Socket and PID Are Active: ` ls -l /run/gunicorn/gunicorn.sock `
+- View the PID file (if needed): ` cat /run/gunicorn/gunicorn.pid `
+
+### Fix Permission Issues (If Nginx can't access the socket) 
+Give socket to group www-data (Nginx user): 
+``` 
+sudo chown ubuntu:www-data /run/gunicorn/gunicorn.sock
+```
+Ensure group (Nginx) can read/write:
+```
+sudo chmod 660 /run/gunicorn/gunicorn.sock
+```
+- Test Your Deployment ` https://api.hdiplatform.in `
+- Access Log:
+```
+sudo tail -f /var/log/nginx/hiringdogbackend_access.log
+```
+- Error Log: 
+```
+sudo tail -f /var/log/nginx/hiringdogbackend_error.log
+```
+
+### Change to (local TCP for single VM):
+```
+location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
 ```
