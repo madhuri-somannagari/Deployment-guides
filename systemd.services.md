@@ -18,9 +18,8 @@ EnvironmentFile=/home/ubuntu/secrets/hiringdog.env
 Environment="PYTHONUNBUFFERED=1"
 
 ExecStart=/home/ubuntu/shared_venv/bin/gunicorn \
-  --workers 2 \
-  --pid /run/gunicorn/gunicorn.pid \
-  --bind unix:/run/gunicorn/gunicorn.sock \
+  --workers 2 --pid /run/gunicorn/gunicorn.pid 
+  --bind 127.0.0.1:8000 
   hiringdogbackend.wsgi:application
 
 ExecReload=/bin/kill -s USR2 $MAINPID
@@ -42,12 +41,12 @@ LimitNOFILE=4096
 WantedBy=multi-user.target
 ```
 
-### After (TCP bind on port 8000, accessible to LB/NGINX):
+### After (bind on gunicorn.sock, accessible to NGINX):
 ```
 ExecStart=/home/ubuntu/shared_venv/bin/gunicorn \
   --workers 2 \
   --pid /run/gunicorn/gunicorn.pid \
-  --bind 0.0.0.0:8000 \
+  --bind unix:/run/gunicorn/gunicorn.sock \
   hiringdogbackend.wsgi:application
 
 ```
@@ -159,8 +158,7 @@ server {
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
     location / {
-            #proxy_pass http://127.0.0.1:5000;  # Change port if needed
-        proxy_pass http://unix:/run/gunicorn/gunicorn.sock:;
+        proxy_pass http://127.0.0.1:8000;  # Change port if needed
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -198,10 +196,11 @@ sudo tail -f /var/log/nginx/hiringdogbackend_access.log
 sudo tail -f /var/log/nginx/hiringdogbackend_error.log
 ```
 
-### Change to (local TCP for single VM):
+### Change to (local gunicorn.sock for single VM):
 ```
 location / {
-    proxy_pass http://127.0.0.1:8000;
+    #proxy_pass http://127.0.0.1:8000;
+    proxy_pass http://unix:/run/gunicorn/gunicorn.sock:;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
