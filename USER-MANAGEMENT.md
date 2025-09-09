@@ -22,10 +22,11 @@ sudo usermod -aG dev dev1
 Assign the project directory and its contents to the correct user and group (e.g., ubuntu:dev):
 ``` 
 sudo chown -R ubuntu:dev /home/ubuntu/git-source
+chmod 755 /home/ubuntu/git-source
 ```
 Set read/write for owner and group, none for others (all regular files except .env):
 ``` 
-sudo find /home/ubuntu/git-source -type f ! -name ".env" -exec chmod 775 {} \;
+sudo find /home/ubuntu/git-source -type f ! -name ".env" -exec chmod 664 {} \;
 ```
 Use chmod 2770 for directories (for group inheritance and security).
 ``` 
@@ -35,7 +36,8 @@ Find all .env files and apply ownership and permissions
 ``` 
 sudo find /home/ubuntu/ -type f -name ".env" -exec chown ubuntu:dev {} \;
 sudo find /home/ubuntu/ -type f -name ".env" -exec chmod 640 {} \;
-sudo find /home/ubuntu/git-source -type f -exec chmod 640 {} \;
+chmod 775 /home/ubuntu/git-source/deploy.sh
+chmod 775 /home/ubuntu/git-source/manage.py
 ```
 Specific .env File Handling
 ```
