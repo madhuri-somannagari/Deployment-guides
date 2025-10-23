@@ -515,3 +515,131 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 ```
+
+### manual trigger
+To automate the restart process for application services in the environment using a manual trigger (dispatch event).
+This ensures:
+- Secure service management through GitHub Actions.
+- Centralized control for service operations.
+- Reduced human error while restarting services.
+
+***Manual Trigger Configuration*** Create the workflow file in your repository at: ```.github/workflows/manual-restart.yml ```
+
+```
+name: Manual Service Restart
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to restart'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - gunicorn
+          - celery
+          - celery-beat
+          - redis
+          - rabbitmq
+          - all
+      
+      reason:
+        description: 'Reason for restart'
+        required: true
+        default: 'Manual trigger via GitHub Actions'
+
+        
+jobs:
+  restart:
+    runs-on: self-hosted
+    env:
+      SERVICE: ${{ github.event.inputs.service || 'all' }}
+      REASON:  ${{ github.event.inputs.reason  || 'Manual trigger' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Restart/Reload services (run systemctl as ubuntu, no password prompt)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Service: ${SERVICE}"
+          echo "Reason:  ${REASON}"
+
+          restart_svc() { sudo systemctl restart "$1"; }
+          reload_svc()  { sudo systemctl reload "$1" || sudo systemctl restart "$1"; }
+          is_active()   { sudo systemctl is-active --quiet "$1"; }
+
+          case "${SERVICE}" in
+            gunicorn)
+              reload_svc gunicorn
+              sleep 3
+              is_active gunicorn || { echo "❌ Gunicorn not active"; exit 1; }
+              echo "✅ Gunicorn reloaded successfully"
+              ;;
+            celery)
+              restart_svc celery
+              restart_svc celery-beat
+              sleep 5
+              is_active celery && is_active celery-beat || { echo "❌ Celery or Celery Beat not active"; exit 1; }
+              echo "✅ Celery services restarted successfully"
+              ;;
+            celery-beat)
+              restart_svc celery-beat
+              sleep 3
+              is_active celery-beat || { echo "❌ Celery Beat not active"; exit 1; }
+              echo "✅ Celery Beat restarted successfully"
+              ;;
+            redis)
+              restart_svc redis-server
+              sleep 3
+              is_active redis-server || { echo "❌ Redis not active"; exit 1; }
+              echo "✅ Redis restarted successfully"
+              ;;
+            rabbitmq)
+              restart_svc rabbitmq-server
+              sleep 10
+              is_active rabbitmq-server || { echo "❌ RabbitMQ not active"; exit 1; }
+              echo "✅ RabbitMQ restarted successfully"
+              ;;
+            all)
+              echo "Restarting all services in dependency order..."
+              restart_svc redis-server
+              sleep 3
+              restart_svc rabbitmq-server
+              sleep 10
+              restart_svc celery
+              restart_svc celery-beat
+              sleep 5
+              reload_svc gunicorn
+              sleep 3
+              failures=()
+              for s in redis-server rabbitmq-server celery celery-beat gunicorn; do
+                if ! is_active "$s"; then failures+=("$s"); fi
+              done
+              if [ ${#failures[@]} -eq 0 ]; then
+                echo "✅ All services healthy"
+              else
+                echo "❌ Unhealthy services: ${failures[*]}"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "❌ Unknown service: ${SERVICE}"
+              exit 1
+              ;;
+          esac
+
+          echo "📊 Final service status:"
+          sudo systemctl status gunicorn celery celery-beat redis-server rabbitmq-server --no-pager --lines=1 || true
+```
+
+### How to Trigger Manually
+- Navigate to your repository in GitHub.
+- Click the Actions tab. >> Select the workflow titled “Manual Service Restart”.
+- Click Run workflow (top-right corner).
+- Provide:
+Service to restart → Choose the service (e.g., gunicorn, celery, redis, etc.)
+Reason → Optional comment or description.
+
