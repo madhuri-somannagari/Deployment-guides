@@ -3,54 +3,125 @@
 #### Objective:
 Implement a secure, auditable, and maintainable access control system for servers with the principle of least privilege.
 
-#### Principle: Least Privilege & Role-Based Access
-- Never share the root account.
-- No one logs in as root directly.
-- Each person has their own user account.
-- Access is granted via groups and sudoers, not by giving out the root password.
-- Everything is least privilege, auditable, revocable.
+#### Admin Users
+****CAN****: Full system access (via IAM/sudo) for emergency management
 
 ### User and Group SetUp
 Create a new user and group:
-```bash 
-sudo add user dev1
-sudo groupadd dev
-sudo usermod -aG dev dev1
+```bash
+# create user
+sudo adduser dev1
+sudo adduser devops1
+
+# create groups
+sudo groupadd developers
+sudo groupadd devops
+
+# check groups
+getent group developers devops
+
+# add user to group
+sudo usermod -aG developers dev1
+sudo usermod -aG devops devops1
+
 ```
 
 ### Project Directory Ownership and Permissions
 Assign the project directory and its contents to the correct user and group (e.g., ubuntu:dev):
 ``` 
-sudo chown -R ubuntu:dev /home/ubuntu/git-source
-chmod 755 /home/ubuntu/git-source
+sudo chown -R hdiplatform:developers /home/hdiplatform/Hiringdog-backend
+
+sudo chgrp developers /home/hdiplatform
+
+sudo find /home/hdiplatform/Hiringdog-backend -type d -exec chmod 755 {} \;
+
+# -- (OR) --  Use chmod 2770 for directories (for group inheritance and security)
+sudo find /home/hdiplatform/Hiringdog-backend -type d -exec chmod 2755 {} \;
+
+sudo find /home/hdiplatform/Hiringdog-backend -type f ! -name ".env" -exec chmod 644 {} \;
 ```
-Set read/write for owner and group, none for others (all regular files except .env):
-``` 
-sudo find /home/ubuntu/git-source -type f ! -name ".env" -exec chmod 664 {} \;
-```
-Use chmod 2770 for directories (for group inheritance and security).
-``` 
-sudo find /home/ubuntu/git-source -type d -exec chmod 2770 {} \;
-``` 
+
 Find all .env files and apply ownership and permissions
 ``` 
-sudo find /home/ubuntu/ -type f -name ".env" -exec chown ubuntu:dev {} \;
-sudo find /home/ubuntu/ -type f -name ".env" -exec chmod 640 {} \;
-chmod 775 /home/ubuntu/git-source/deploy.sh
-chmod 775 /home/ubuntu/git-source/manage.py
+sudo find /home/hdiplatform/Hiringdog-backend -type f -name "*.py" -exec chmod 744 {} \;
+sudo find /home/hdiplatform/Hiringdog-backend -type f -name "*.md" -exec chmod 644 {} \;
+sudo find /home/hdiplatform/Hiringdog-backend -type f -name "*.txt" -exec chmod 644 {} \;
+sudo find /home/hdiplatform/Hiringdog-backend -type f -name "*.log" -exec chmod 644 {} \;
+sudo find /home/hdiplatform/Hiringdog-backend -type f -name ".git*" -exec chmod 644 {} \;
+
+sudo chmod 755 /home/hdiplatform/Hiringdog-backend/manage.py
+sudo chmod 644 /home/hdiplatform/Hiringdog-backend/hdip_architechture.png
 ```
-Specific .env File Handling
-```
-sudo chown ubuntu:dev /home/ubuntu/git-source/.env
-sudo chmod 640 /home/ubuntu/git-source/.env
+
+Set read/write for owner and group, none for others (all regular files except .env):
+``` 
+sudo chown hdiplatform:hdiplatform /home/hdiplatform/Hiringdog-backend/.env
+sudo find /home/hdiplatform -name ".env*" -exec chmod 600 {} \; 
 ```
 Parent Directory Execute Bit
 Allows users to traverse into the directory.
 ``` 
-sudo chmod o+x /home/ubuntu
-sudo chmod o+x /home/ubuntu/git-source
+sudo chmod o+x /home/hdiplatform/Hiringdog-Backend
+sudo chmod o+x /home/hdiplatform/Hiringdog-Backend/hiringdog
 # ...repeat for any other parent directories as needed
 ```
+
+### Controlled sudo Access
+Edit (with visudo) /etc/sudoers.d/:
+``` 
+sudo visudo -f /etc/sudoers.d/developer-group
+```
+Developers - APPLICATION services management only
+```
+# Developer group limited systemctl privileges
+%developers ALL=(ALL) NOPASSWD: \
+  /bin/systemctl restart gunicorn.service, \
+  /bin/systemctl reload gunicorn.service, \
+  /bin/systemctl status gunicorn.service, \
+  /bin/systemctl restart celery.service, \
+  /bin/systemctl status celery.service, \
+  /bin/systemctl restart celery-beat.service, \
+  /bin/systemctl status celery-beat.service, \
+  /bin/systemctl restart nginx.service, \
+  /bin/systemctl status nginx.service, \
+  /bin/systemctl restart redis.service, \
+  /bin/systemctl status redis.service, \
+  /bin/systemctl restart rabbitmq-server.service, \
+  /bin/systemctl status rabbitmq-server.service
+
+```
+``` 
+sudo visudo -f /etc/sudoers.d/devops-group
+```
+Devops - Application services management and read log access
+```
+# Developer group limited systemctl privileges
+%devops ALL=(ALL) NOPASSWD: \
+  /bin/journalctl -u gunicorn, \
+  /bin/journalctl -u celery, \
+  /bin/journalctl -u celery-beat, \
+  /bin/journalctl -u nginx, \
+  /bin/journalctl -u redis-server, \
+  /bin/journalctl -u rabbitmq-server
+
+%devops ALL=(ALL) NOPASSWD: \
+  /bin/systemctl restart gunicorn.service, \
+  /bin/systemctl reload gunicorn.service, \
+  /bin/systemctl status gunicorn.service, \
+  /bin/systemctl restart celery.service, \
+  /bin/systemctl status celery.service, \
+  /bin/systemctl restart celery-beat.service, \
+  /bin/systemctl status celery-beat.service, \
+  /bin/systemctl restart nginx, \
+  /bin/systemctl status nginx,\
+  /bin/systemctl restart redis-server, \
+  /bin/systemctl status redis-server, \
+  /bin/systemctl restart rabbitmq-server, \
+  /bin/systemctl status rabbitmq-server
+```
+
+
+
 ### SSH Configuration
 Edit /etc/ssh/sshd_config: 
 ```bash.sh
@@ -81,19 +152,6 @@ sudo chmod 600 /home/dev1/.ssh/authorized_keys
 # Paste public key into authorized_keys using editor or automation
 sudo nano /home/dev1/.ssh/authorized_keys
 ```
-### Controlled sudo Access
-Edit (with visudo) /etc/sudoers.d/dev-group:
-``` 
-sudo visudo -f /etc/sudoers.d/dev-group
-Allow limited systemctl and logs:
-# Allow dev group to restart and check status of gunicorn, celery, and celery-beat
-%dev ALL=NOPASSWD: /bin/systemctl restart gunicorn, /bin/systemctl status gunicorn, /bin/systemctl reload gunicorn
-%dev ALL=NOPASSWD: /bin/systemctl restart celery, /bin/systemctl status celery
-%dev ALL=NOPASSWD: /bin/systemctl restart celery-beat, /bin/systemctl status celery-beat
-%dev ALL=NOPASSWD: /bin/systemctl restart nginx, /bin/systemctl status nginx
-```
-
-**Results:** When user try to access to list or uses sudo it will denied the permissions
 
 ### Best Practice Checklist for Real-Time Production
 - No root login via SSH
@@ -103,7 +161,7 @@ Allow limited systemctl and logs:
 - App runs as non-root user, managed by systemd or supervisor
 - App directory permissions restrict access to only necessary users/groups
 - Regularly audit users, groups, and sudoers
-- Document all changes and access grants
+
 
 ### Core Concepts
 | Concept          | Why It Matters                                                                |
@@ -114,6 +172,7 @@ Allow limited systemctl and logs:
 | Home directories | Manage developer environments and personal data                               |
 | Root directory   | Critical system files — must be restricted                                    |
 | SSH configuration| Manage who can SSH into a server and with what keys  
+
 ### View Current Users and Groups
 | Command              | Purpose                                        |
 |----------------------|------------------------------------------------|
