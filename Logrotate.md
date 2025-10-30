@@ -11,8 +11,9 @@ sudo apt install logrotate -y
 Create a dedicated directory to store application logs with restricted access:
 ```
 sudo mkdir -p /var/log/hiringdog
-sudo chown www-data:www-data /var/log/hiringdog
-sudo chmod 750 /var/log/hiringdog
+sudo chown -R hdiplatform:devops /var/log/hiringdog/
+sudo chmod 755 /var/log/hiringdog
+ls -ld /var/log/hiringdog
 ```
 ### Logrotate Configuration 
 Create a logrotate configuration file specifically for the Hiringdog application.
