@@ -452,7 +452,17 @@ User- `github-runner`- Executes GitHub Actions workflows
 Use sudo visudo -f /etc/sudoers.d/github-runner to give NOPASSWD for only required commands.
 Example: 
 ```
-rollback_latest.shgithub-runner ALL=(ALL) NOPASSWD: /bin/systemctl restart gunicorn, /bin/systemctl restar>
+github-runner ALL=(ALL) NOPASSWD: /bin/systemctl restart gunicorn, \
+                                  /bin/systemctl restart celery, \
+                                  /bin/systemctl restart celery-beat, \
+                                  /bin/systemctl restart redis-server, \
+                                  /bin/systemctl restart rabbitmq-server, \
+                                  /bin/systemctl reload gunicorn, \
+                                  /bin/systemctl start gunicorn, \
+                                  /bin/systemctl stop gunicorn, \
+                                  /bin/systemctl is-active *, \
+                                  /bin/systemctl status *
+
 # Allow managing GitHub runner services
 github-runner ALL=(ALL) NOPASSWD: /home/github-runner/actions-runner/svc.sh, \
                                 /bin/systemctl start actions.runner*, \
