@@ -69,23 +69,22 @@ Project Structure:
 Location: deploy.sh: `/home/ubuntu/deploy.sh`
 ```script.sh
 #!/bin/bash
-#-e-errexit, -u-unset variables exit, -o-pipefail exit if one command fails
+
 set -euo pipefail
 
 # ===== Configurable Variables =====
-BRANCH="${1:-staging-production}"
-
-REPO_DIR="/home/ubuntu/git-source"
-APP_DIR="/home/ubuntu"
+BRANCH="${1:-production}"
+REPO_DIR="/home/hdiplatform/git-source"
+APP_DIR="/home/hdiplatform"
 RELEASES_DIR="$APP_DIR/releases"
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
 RELEASE_DIR="$RELEASES_DIR/$TIMESTAMP"
-SHARED_VENV="/home/ubuntu/shared_venv"
+SHARED_VENV="/home/hdiplatform/shared_venv"
 CURRENT_LINK="$APP_DIR/Hiringdog-backend"
 REQ_HASH_FILE="$SHARED_VENV/.last_requirements.hash"
 
 log() {
-    echo "[`date +%Y-%m-%d\ %H:%M:%S`] $1"
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
 }
 
 # ===== Pull Code =====
@@ -101,12 +100,12 @@ mkdir -p "$RELEASE_DIR"
 
 log "Copying project files..."
 rsync -a \
-  --exclude '.git' \
-  --exclude '__pycache__' \
-  --exclude '*.pyc' \
-  --exclude '.pytest_cache' \
-  "$REPO_DIR/" "$RELEASE_DIR/"
-
+    --exclude '.git' \
+    --exclude '__pycache__' \
+    --exclude '*.pyc' \
+    --exclude '.pytest_cache' \
+    --exclude 'venv' \
+    "$REPO_DIR/" "$RELEASE_DIR/"
 
 # ===== Set up Python Environment =====
 cd "$RELEASE_DIR"
@@ -117,16 +116,16 @@ if [ ! -d "$SHARED_VENV" ]; then
     log "Creating shared virtual environment at $SHARED_VENV"
     python3.12 -m venv "$SHARED_VENV"
 fi
+
 log "Linking shared virtual environment..."
 ln -sfn "$SHARED_VENV" "$RELEASE_DIR/venv"
 
 log "Activating virtual environment..."
 source "$RELEASE_DIR/venv/bin/activate"
 
-log "Installing dependencies..."
-
+log "Checking dependencies..."
 REQ_HASH=$(sha256sum requirements.txt | awk '{print $1}')
-if [ ! -f "$REQ_HASH_FILE" ] || [ "$(cat $REQ_HASH_FILE)" != "$REQ_HASH" ]; then
+if [ ! -f "$REQ_HASH_FILE" ] || [ "$(cat "$REQ_HASH_FILE")" != "$REQ_HASH" ]; then
     log "requirements.txt changed. Installing dependencies..."
     pip install --upgrade pip
     pip install --no-cache-dir -r requirements.txt
@@ -135,14 +134,16 @@ else
     log "No changes in requirements.txt. Skipping pip install."
 fi
 
-# ====Environment and Django checks =====
+# ===== Environment and Django checks =====
 log "Checking .env file..."
-if [ ! -f ".env" ]; then
-    log "[ERROR] .env file not found. Deployment aborted."
-    exit 1
+if [ ! -f "$RELEASE_DIR/.env" ]; then
+    log "Copying .env from current deployment..."
+    cp "$CURRENT_LINK/.env" "$RELEASE_DIR/.env" 2>/dev/null || {
+        log "[ERROR] .env file not found. Deployment aborted."
+        exit 1
+    }
 fi
 
-# ===== Run Migrations and Health Checks =====
 log "Running migrations..."
 set -a && source .env && set +a
 python manage.py migrate --noinput
@@ -164,54 +165,18 @@ log "Updating symlink: $CURRENT_LINK -> $RELEASE_DIR"
 ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
 
 
-# ===== Restart Services =====
-log "Reloading/restarting services..."
-
-if systemctl is-active --quiet gunicorn; then
-    log "Performing zero-downtime Gunicorn restart..."
-    
-    # Get the master process PID
-    GUNICORN_PID=$(systemctl show --property MainPID gunicorn | cut -d= -f2)
-    
-    if [[ "$GUNICORN_PID" != "0" ]]; then
-        # Send USR2 to start new master with new workers
-        sudo kill -USR2 "$GUNICORN_PID"
-        
-        # Wait for new master to start
-        sleep 3
-        
-        # Send WINCH to old master to gracefully shut down old workers
-        sudo kill -WINCH "$GUNICORN_PID"
-        
-        # Wait a bit more for graceful shutdown
-        sleep 2
-        
-        # Send TERM to old master to shut it down completely
-        sudo kill -TERM "$GUNICORN_PID"
-        
-        log "Zero-downtime Gunicorn restart completed"
-    else
-        log "Could not get Gunicorn PID, falling back to systemctl restart"
-        sudo systemctl restart gunicorn
-    fi
-else
-    log "Starting Gunicorn..."
-    sudo systemctl start gunicorn
-fi
-
-# Graceful restart of Celery services
-log "Checking if Celery restart is needed..."
-
-CELERY_SHOULD_RESTART=false
-
-# Read the last deployed Git commit hash from a file (if it exists).
-# This helps detect what's changed since the last deployment.
-LAST_DEPLOYED_COMMIT=$(cat "$APP_DIR/.last_deployed_commit" 2>/dev/null || echo "")
+# ===== Get Commit Information =====
+log "Getting commit information for restart decisions..."
 
 # Temporarily move into the application repo directory to run Git commands
 pushd "$REPO_DIR" > /dev/null
 
 CURRENT_COMMIT=$(git rev-parse HEAD)
+# Last commit message for the commit being deployed
+COMMIT_MSG=$(git log -1 --pretty=%B "$CURRENT_COMMIT" 2>/dev/null || echo "")
+
+# Read the last deployed Git commit hash from a file (if it exists).
+LAST_DEPLOYED_COMMIT=$(cat "$APP_DIR/.last_deployed_commit" 2>/dev/null || echo "")
 
 # If we have a last deployed commit, compare it to the current commit and get a list of files that changed.
 if [ -n "$LAST_DEPLOYED_COMMIT" ]; then
@@ -220,27 +185,132 @@ else
     CHANGED_FILES=$(git diff --name-only HEAD~5)  # fallback
 fi
 
-#returns to the previous directory
+# Files/patterns that typically affect Celery behavior
+CELERY_AFFECTING_REGEX='(tasks\.py|celery(\.py|/)|celeryconfig\.py|hiringdogbackend/celery\.py|requirements\.txt|pyproject\.toml|poetry\.lock|settings\.py|hiringdogbackend/settings/.*\.py|.*models\.py|.*utils\.py|services/|jobs/)'
+
+SHOULD_RESTART=false
+
+# File-based detection (most cases)
+if echo "$CHANGED_FILES" | grep -Eiq "$CELERY_AFFECTING_REGEX"; then
+    SHOULD_RESTART=true
+elif echo "$COMMIT_MSG" | grep -Eiq '\[(restart-?celery|restart:celery|restart:all)\]'; then
+    SHOULD_RESTART=true
+fi
+# Return to previous directory
 popd > /dev/null
 
-if echo "$CHANGED_FILES" | grep -E 'tasks\.py|celery(\.py|/)|requirements\.txt'; then
+log "Current commit: $CURRENT_COMMIT"
+log "Commit message: $COMMIT_MSG"
+log "Changed files: $(echo "$CHANGED_FILES" | wc -l) files"
+log "Should restart Celery: $SHOULD_RESTART"
+
+RESTART_RABBITMQ=false
+RESTART_REDIS=false
+
+# ===== Gunicorn Management =====
+
+log "Reloading/restarting services..."
+
+if echo "$COMMIT_MSG" | grep -Eiq '\[(restart-?gunicorn|restart:gunicorn|restart:all)\]'; then
+    log "Commit message contains restart keyword. Performing full restart..."
+    sudo systemctl daemon-reload || true
+    sudo systemctl restart gunicorn
+    sleep 3
+    systemctl is-active --quiet gunicorn|| { log "[ERROR] Gunicorn failed to restart"; exit 1; }
+    log "Gunicorn restarted successfully."
+else
+    log "No restart keyword found. Performing graceful reload (zero-downtime)..."
+
+
+    # Check if Gunicorn is running
+    if systemctl is-active --quiet gunicorn; then
+        log "Performing zero-downtime Gunicorn reload..."
+        if sudo systemctl reload gunicorn; then
+            log "Gunicorn reload completed successfully"
+        else
+            log "[WARNING] Reload failed, falling back to restart"
+            sudo systemctl restart gunicorn
+        fi
+    else
+    log "Starting Gunicorn..."
+    sudo systemctl start gunicorn
+    fi
+fi
+
+
+# ===== celery Management =====
+
+log "Checking if Celery restart is needed..."
+
+
+if [ "$SHOULD_RESTART" = true ]; then
     log "Restarting Celery and Celery Beat..."
     sudo systemctl restart celery
     sudo systemctl restart celery-beat
+    sleep 5
+    systemctl is-active --quiet celery || { log "[ERROR] Celery failed to restart"; exit 1; }
+    systemctl is-active --quiet celery-beat || { log "[ERROR] Celery Beat failed to restart"; exit 1; }
+    log "Celery services restarted successfully"
 else
     log "No changes affecting Celery. Skipping restart."
 fi
 
-echo "$CURRENT_COMMIT" > "$APP_DIR/.last_deployed_commit"
+# ===== RabbitMQ Restart Logic =====
+if echo "$COMMIT_MSG" | grep -Eiq '\[(restart-?rabbitmq|restart:rabbitmq|restart:all)\]'; then
+    RESTART_RABBITMQ=true
+    log "RabbitMQ restart requested via commit message"
+    sudo systemctl restart rabbitmq-server
+    sleep 10
+    systemctl is-active --quiet rabbitmq-server || { log "[ERROR] RabbitMQ failed to restart"; exit 1; }
+    log "RabbitMQ restarted successfully"
+else
+    log "RabbitMQ restart not needed"
+fi
 
-log "[SUCCESS] Deployment complete: $RELEASE_DIR"
+# ===== Redis Restart Logic =====
+if echo "$COMMIT_MSG" | grep -Eiq '\[(restart-?redis|restart:redis|restart:all)\]'; then
+    RESTART_REDIS=true
+    log "Redis restart requested via commit message"
+elif echo "$CHANGED_FILES" | grep -Eiq '(redis|cache|session|celery.*backend)'; then
+    RESTART_REDIS=true
+    log "Redis restart needed due to cache/session configuration changes"
+else
+    log "Redis restart not needed"
+fi
+
+# RabbitMQ restart
+if [ "$RESTART_RABBITMQ" = true ]; then
+    log "Restarting RabbitMQ..."
+    sudo systemctl restart rabbitmq-server
+    sleep 10
+    systemctl is-active --quiet rabbitmq-server || { log "[ERROR] RabbitMQ failed to restart"; exit 1; }
+    log "RabbitMQ restarted successfully"
+else
+    log "RabbitMQ not restarted (no relevant changes)"
+fi
+
+# Redis restart
+if [ "$RESTART_REDIS" = true ]; then
+    log "Restarting Redis..."
+    sudo systemctl restart redis-server
+    sleep 3
+    systemctl is-active --quiet redis-server || { log "[ERROR] Redis failed to restart"; exit 1; }
+    log "Redis restarted successfully"
+else
+    log "Redis not restarted (no relevant changes)"
+fi
+
+# ===== Save Deployment State =====
+echo "$CURRENT_COMMIT" > "$APP_DIR/.last_deployed_commit"
 
 # ===== Clean Up Old Releases =====
 log "Cleaning up old releases (keeping last 5)..."
 cd "$RELEASES_DIR"
-ls -1dt "$RELEASES_DIR"/* | tail -n +6 | xargs -r rm -rf
+ls -1dt "$RELEASES_DIR"/* 2>/dev/null | tail -n +6 | xargs -r rm -rf
 
+log "[SUCCESS] Deployment complete: $RELEASE_DIR"
 exit 0
+
 ```
 #### rollback_latest.sh - Reverts the symlink to the previous stable release if something fails.
 location: : /home/ubuntu/rollback_latest.sh
@@ -253,8 +323,9 @@ log() {
     echo "[`date +%Y-%m-%d\ %H:%M:%S`] $1"
 }
 
-RELEASES_DIR="/home/ubuntu/releases"
-SYMLINK="/home/ubuntu/Hiringdog-backend"
+
+RELEASES_DIR="/home/hdiplatform/releases"
+SYMLINK="/home/hdiplatform/Hiringdog-backend"
 
 RELEASES=($(ls -td ${RELEASES_DIR}/*))
 
@@ -291,26 +362,26 @@ fi
 log "Reloading/restarting Gunicorn..."
 if systemctl is-active --quiet gunicorn; then
     log "Performing zero-downtime Gunicorn restart..."
-    
+
     # Get the master process PID
     GUNICORN_PID=$(systemctl show --property MainPID gunicorn | cut -d= -f2)
-    
+
     if [[ "$GUNICORN_PID" != "0" ]]; then
         # Send USR2 to start new master with new workers
-        sudo kill -USR2 "$GUNICORN_PID" 
+        sudo kill -USR2 "$GUNICORN_PID"
 
         # Wait for new master to start
-        sleep 3      
+        sleep 3
 
         # Send WINCH to old master to gracefully shut down old workers
         sudo kill -WINCH "$GUNICORN_PID"
 
         # Wait a bit more for graceful shutdown
         sleep 2
-        
+
         # Send TERM to old master to shut it down completely
         sudo kill -TERM "$GUNICORN_PID"
-        
+
         log "Zero-downtime Gunicorn restart completed"
     else
         log "Could not get Gunicorn PID, falling back to systemctl restart"
@@ -323,6 +394,7 @@ fi
 
 log "[SUCCESS] Rollback complete."
 log "New symlink points to: $(readlink -f $SYMLINK)"
+
 ```
 Script Name	|Description	| Path
 deploy.sh	  |Handles deployment with zero downtime	|/home/ubuntu/deploy.sh
@@ -330,8 +402,8 @@ rollback_latest.sh	|Handles rollback to last stable release	|/home/ubuntu/rollba
 
 ### Permissions:
 ``` bash
-chmod +x /home/ubuntu/deploy.sh
-chmod +x /home/ubuntu/rollback_latest.sh
+chmod +x /home/hdiplatform/deploy.sh
+chmod +x /home/hdiplatform/rollback_latest.sh
 ```
 
 ### Deployment Strategy 
@@ -365,16 +437,16 @@ RELEASE_DIR="$RELEASES_DIR/$TIMESTAMP"
 ln -sfn "$RELEASE_DIR" /home/ubuntu/Hiringdog-backend
 ```
 - **Original Git Repository**:  
-  `/home/ubuntu/git-source`  
+  `/home/hdiplatform/git-source`  
   Contains the cloned GitHub repo (with `.git/`).
 - **Timestamped Release Directories**:  
-  `/home/ubuntu/releases/<timestamp>`  
+  `/home/hdiplatform/releases/<timestamp>`  
   Each deployment creates a new folder named by timestamp (e.g., `20250611111202`), created via `rsync` from the Git repo.
 - **Active Symlink Directory**:  
-  `/home/ubuntu/Hiringdog-backend`  
+  `/home/hdiplatform/Hiringdog-backend`  
   This is a symbolic link that always points to the **currently active release** of the application.
   ```bash
-  ln -sfn "$RELEASE_DIR" /home/ubuntu/Hiringdog-backend
+  ln -sfn "$RELEASE_DIR" /home/hdiplatform/Hiringdog-backend
   ```
 This ensures minimal disruption and safer, atomic deployments.
 
@@ -468,8 +540,8 @@ github-runner ALL=(ALL) NOPASSWD: /home/github-runner/actions-runner/svc.sh, \
                                 /bin/systemctl start actions.runner*, \
                                 /bin/systemctl stop actions.runner*, \
                                 /bin/systemctl status actions.runner*
-github-runner ALL=(ubuntu) NOPASSWD: /home/ubuntu/rollback_latest.sh
-github-runner ALL=(ubuntu) NOPASSWD: /home/ubuntu/deploy.sh
+github-runner ALL=(ubuntu) NOPASSWD: /home/hdiplatform/rollback_latest.sh
+github-runner ALL=(ubuntu) NOPASSWD: /home/hdiplatform/deploy.sh
 ```
 
 #### Create the following workflow file: file_path:`.github/workflows/staging-deploy.yml`
@@ -489,13 +561,13 @@ jobs:
 
       - name: Run deployment script on VM
         run: |
-          sudo -u ubuntu /home/ubuntu/deploy.sh
+          sudo -u hdiplatform /home/hdiplatform/deploy.sh
 
       - name: Rollback if Deployment Fails
         if: failure()
         run: |
           echo "Deployment failed. Rolling back..."
-          sudo -u ubuntu /home/ubuntu/rollback_latest.sh
+          sudo -u hdiplatform /home/hdiplatform/rollback_latest.sh
 
       - name: Check service status
         run: |
